@@ -11,27 +11,46 @@ import com.scut.industrial_software.model.dto.ClientTaskStatusUpdateDTO;
 import com.scut.industrial_software.model.dto.PageRequestDTO;
 import com.scut.industrial_software.model.dto.RemoteTaskStartDTO;
 import com.scut.industrial_software.model.dto.TaskCreateDTO;
+import com.scut.industrial_software.model.dto.UserDTO;
 import com.scut.industrial_software.model.entity.ModProjects;
 import com.scut.industrial_software.model.entity.ModTasks;
 import com.scut.industrial_software.model.entity.ModUsers;
+import com.scut.industrial_software.model.entity.UserOrganization;
 import com.scut.industrial_software.mapper.ModTasksMapper;
 import com.scut.industrial_software.model.vo.ModTasksVO;
+import com.scut.industrial_software.model.vo.TaskFileInfoVO;
+import com.scut.industrial_software.model.vo.TaskFileListVO;
+import com.scut.industrial_software.model.vo.TaskFileUploadVO;
 import com.scut.industrial_software.service.IModProjectsService;
 import com.scut.industrial_software.service.IModTasksService;
 import com.scut.industrial_software.service.IModUsersService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.scut.industrial_software.service.IMonitorService;
+import com.scut.industrial_software.service.IPermissionService;
 import com.scut.industrial_software.utils.TaskDirectoryManager;
+import com.scut.industrial_software.utils.UserHolder;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
+import org.springframework.web.multipart.MultipartFile;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * <p>
@@ -52,6 +71,9 @@ public class ModTasksServiceImpl extends ServiceImpl<ModTasksMapper, ModTasks> i
 
     @Autowired
     private IMonitorService monitorService;
+
+    @Autowired
+    private IPermissionService permissionService;
 
     @Autowired
     private TaskDirectoryManager taskDirectoryManager;
@@ -345,6 +367,275 @@ public class ModTasksServiceImpl extends ServiceImpl<ModTasksMapper, ModTasks> i
     @Override
     public ApiResult<?> stopTask(String taskId) {
         return monitorService.stopProgram(taskId);
+    }
+
+    @Override
+    public ApiResult<?> uploadTaskInput(String taskId, MultipartFile file, Boolean overwrite) {
+        ModTasks task = getTaskOrThrow(taskId);
+        validateTaskFileManagePermission(task);
+        if (file == null || file.isEmpty()) {
+            return ApiResult.failed("上传文件不能为空");
+        }
+
+        String originalFileName = file.getOriginalFilename();
+        String fileName = sanitizeFileName(originalFileName);
+        if (!StringUtils.hasText(fileName)) {
+            return ApiResult.failed("文件名非法");
+        }
+        if (!isTaskEditable(task)) {
+            return ApiResult.failed("当前任务状态不允许上传输入文件");
+        }
+
+        try {
+            Path inputDir = taskDirectoryManager.getInputDir(task.getCreatorId(), task.getTaskId());
+            Path targetFile = taskDirectoryManager.resolveFile(inputDir, fileName);
+            if (Files.exists(targetFile) && !Boolean.TRUE.equals(overwrite)) {
+                return ApiResult.failed("文件已存在");
+            }
+
+            try (InputStream inputStream = file.getInputStream()) {
+                Files.copy(inputStream, targetFile, StandardCopyOption.REPLACE_EXISTING);
+            }
+
+            long fileSize = Files.size(targetFile);
+            TaskFileUploadVO uploadVO = new TaskFileUploadVO();
+            uploadVO.setTaskId(formatTaskId(task.getTaskId()));
+            uploadVO.setFileName(fileName);
+            uploadVO.setFileSize(fileSize);
+            uploadVO.setFileSizeDisplay(taskDirectoryManager.formatFileSize(fileSize));
+            uploadVO.setDirectoryType("input");
+            uploadVO.setUploadTime(LocalDateTime.now());
+            return ApiResult.success(uploadVO, "上传成功");
+        } catch (IllegalArgumentException ex) {
+            return ApiResult.failed("文件名非法");
+        } catch (IOException ex) {
+            throw new ApiException(ApiErrorCode.FILE_UPLOAD_FAILED);
+        }
+    }
+
+    @Override
+    public ApiResult<?> listTaskInputFiles(String taskId) {
+        ModTasks task = getTaskOrThrow(taskId);
+        validateTaskFileReadPermission(task);
+
+        try {
+            Path inputDir = taskDirectoryManager.getInputDir(task.getCreatorId(), task.getTaskId());
+            return ApiResult.success(buildTaskFileListVO(task, "input", taskDirectoryManager.listFiles(inputDir)));
+        } catch (IOException ex) {
+            throw new ApiException("查询任务输入文件失败");
+        }
+    }
+
+    @Override
+    public ApiResult<?> deleteTaskInputFile(String taskId, String fileName) {
+        ModTasks task = getTaskOrThrow(taskId);
+        validateTaskFileManagePermission(task);
+        if (!isTaskEditable(task)) {
+            return ApiResult.failed("当前任务状态不允许删除输入文件");
+        }
+
+        try {
+            Path inputDir = taskDirectoryManager.getInputDir(task.getCreatorId(), task.getTaskId());
+            Path targetFile = taskDirectoryManager.resolveFile(inputDir, fileName);
+            if (!Files.isRegularFile(targetFile)) {
+                return ApiResult.resourceNotFound("文件不存在");
+            }
+            Files.delete(targetFile);
+            return ApiResult.success(null, "删除成功");
+        } catch (IllegalArgumentException ex) {
+            return ApiResult.failed("文件名非法");
+        } catch (IOException ex) {
+            throw new ApiException("删除任务输入文件失败");
+        }
+    }
+
+    @Override
+    public ApiResult<?> listTaskResultFiles(String taskId) {
+        ModTasks task = getTaskOrThrow(taskId);
+        validateTaskFileReadPermission(task);
+
+        try {
+            Path resultDir = resolveResultDirectory(task);
+            return ApiResult.success(buildTaskFileListVO(task, "results", taskDirectoryManager.listFiles(resultDir)));
+        } catch (IOException ex) {
+            throw new ApiException("查询任务结果文件失败");
+        }
+    }
+
+    @Override
+    public ResponseEntity<byte[]> downloadTaskResultFile(String taskId, String fileName) {
+        ModTasks task = getTaskOrThrow(taskId);
+        validateTaskFileReadPermission(task);
+
+        try {
+            Path targetFile = resolveResultFile(task, fileName);
+            if (!Files.isRegularFile(targetFile)) {
+                return ResponseEntity.notFound().build();
+            }
+
+            String encodedFileName = encodeFileName(targetFile.getFileName().toString());
+            String asciiFileName = new String(
+                    targetFile.getFileName().toString().getBytes(StandardCharsets.UTF_8),
+                    StandardCharsets.ISO_8859_1
+            );
+            return ResponseEntity.ok()
+                    .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                    .contentLength(Files.size(targetFile))
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename=\"" + asciiFileName + "\"; filename*=UTF-8''" + encodedFileName)
+                    .body(Files.readAllBytes(targetFile));
+        } catch (IllegalArgumentException ex) {
+            return ResponseEntity.badRequest().build();
+        } catch (IOException ex) {
+            return ResponseEntity.internalServerError().build();
+        }
+    }
+
+    private ModTasks getTaskOrThrow(String taskId) {
+        Integer taskIdInt = parseTaskId(taskId);
+        if (taskIdInt == null) {
+            throw new ApiException("任务ID格式不正确");
+        }
+
+        ModTasks task = this.getById(taskIdInt);
+        if (task == null) {
+            throw new ApiException(ApiErrorCode.RESOURCE_NOT_FOUND);
+        }
+        return task;
+    }
+
+    private void validateTaskFileReadPermission(ModTasks task) {
+        UserDTO currentUser = requireCurrentUser();
+        ModProjects project = getTaskProjectOrThrow(task);
+        if (permissionService.isCurrentUserSystemAdmin()) {
+            return;
+        }
+        if (Objects.equals(currentUser.getId(), task.getCreatorId())
+                || Objects.equals(currentUser.getId(), project.getCreator())) {
+            return;
+        }
+
+        if (Integer.valueOf(1).equals(project.getProjectStatus())) {
+            throw new ApiException(ApiErrorCode.FORBIDDEN);
+        }
+
+        if (Integer.valueOf(0).equals(project.getProjectStatus())) {
+            UserOrganization userOrganization = modUsersService.getUserOrganizationRelation(currentUser.getId());
+            Integer currentOrgId = userOrganization == null ? null : userOrganization.getOrgId();
+            if (project.getOrganizationId() != null && project.getOrganizationId().equals(currentOrgId)) {
+                return;
+            }
+        }
+
+        throw new ApiException(ApiErrorCode.FORBIDDEN);
+    }
+
+    private void validateTaskFileManagePermission(ModTasks task) {
+        UserDTO currentUser = requireCurrentUser();
+        ModProjects project = getTaskProjectOrThrow(task);
+        if (permissionService.isCurrentUserSystemAdmin()) {
+            return;
+        }
+        if (Objects.equals(currentUser.getId(), task.getCreatorId())
+                || Objects.equals(currentUser.getId(), project.getCreator())) {
+            return;
+        }
+        if (Integer.valueOf(0).equals(project.getProjectStatus())
+                && permissionService.canManageOrganization(project.getOrganizationId())) {
+            return;
+        }
+        throw new ApiException(ApiErrorCode.FORBIDDEN);
+    }
+
+    private UserDTO requireCurrentUser() {
+        UserDTO currentUser = UserHolder.getUser();
+        if (currentUser == null || currentUser.getId() == null) {
+            throw new ApiException(ApiErrorCode.UNAUTHORIZED);
+        }
+        return currentUser;
+    }
+
+    private ModProjects getTaskProjectOrThrow(ModTasks task) {
+        if (task.getProjectId() == null) {
+            throw new ApiException(ApiErrorCode.PROJECT_NOT_FOUND);
+        }
+        ModProjects project = modProjectsService.getById(task.getProjectId());
+        if (project == null) {
+            throw new ApiException(ApiErrorCode.PROJECT_NOT_FOUND);
+        }
+        return project;
+    }
+
+    private boolean isTaskEditable(ModTasks task) {
+        String status = normalizeStatus(task.getStatus());
+        if (TaskStatusConstants.PENDING.equals(status)) {
+            return task.getServerId() == null;
+        }
+        return TaskStatusConstants.STOPPED.equals(status)
+                || TaskStatusConstants.FAILED.equals(status);
+    }
+
+    private TaskFileListVO buildTaskFileListVO(ModTasks task, String directoryType, List<TaskFileInfoVO> files) {
+        TaskFileListVO listVO = new TaskFileListVO();
+        listVO.setTaskId(formatTaskId(task.getTaskId()));
+        listVO.setTaskStatus(normalizeStatus(task.getStatus()));
+        listVO.setDirectoryType(directoryType);
+        listVO.setFiles(files);
+        return listVO;
+    }
+
+    private Path resolveResultDirectory(ModTasks task) throws IOException {
+        Path outputDir = taskDirectoryManager.getOutputDir(task.getCreatorId(), task.getTaskId());
+        if (!taskDirectoryManager.listFiles(outputDir).isEmpty()) {
+            return outputDir;
+        }
+        return taskDirectoryManager.getInputDir(task.getCreatorId(), task.getTaskId());
+    }
+
+    private Path resolveResultFile(ModTasks task, String fileName) throws IOException {
+        Path outputDir = taskDirectoryManager.getOutputDir(task.getCreatorId(), task.getTaskId());
+        Path outputFile = taskDirectoryManager.resolveFile(outputDir, fileName);
+        if (Files.isRegularFile(outputFile)) {
+            return outputFile;
+        }
+
+        Path inputDir = taskDirectoryManager.getInputDir(task.getCreatorId(), task.getTaskId());
+        Path inputFile = taskDirectoryManager.resolveFile(inputDir, fileName);
+        if (Files.isRegularFile(inputFile)) {
+            return inputFile;
+        }
+        return outputFile;
+    }
+
+    private String sanitizeFileName(String fileName) {
+        if (!StringUtils.hasText(fileName)) {
+            return null;
+        }
+        String cleanedFileName = StringUtils.cleanPath(fileName.trim()).replace("\\", "/");
+        int slashIndex = cleanedFileName.lastIndexOf('/');
+        if (slashIndex >= 0) {
+            cleanedFileName = cleanedFileName.substring(slashIndex + 1);
+        }
+        if (!isSimpleFileName(cleanedFileName)) {
+            return null;
+        }
+        return cleanedFileName;
+    }
+
+    private boolean isSimpleFileName(String fileName) {
+        return StringUtils.hasText(fileName)
+                && !fileName.contains("/")
+                && !fileName.contains("\\")
+                && !".".equals(fileName)
+                && !"..".equals(fileName);
+    }
+
+    private String formatTaskId(Integer taskId) {
+        return "task_" + taskId;
+    }
+
+    private String encodeFileName(String fileName) {
+        return URLEncoder.encode(fileName, StandardCharsets.UTF_8).replace("+", "%20");
     }
 
     /**

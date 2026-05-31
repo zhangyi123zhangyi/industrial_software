@@ -7,6 +7,8 @@ import com.scut.industrial_software.model.dto.RemoteTaskStartDTO;
 import com.scut.industrial_software.model.dto.TaskCreateDTO;
 import com.scut.industrial_software.model.entity.ModTasks;
 import com.baomidou.mybatisplus.extension.service.IService;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.multipart.MultipartFile;
 
 /**
  * <p>
@@ -69,4 +71,14 @@ public interface IModTasksService extends IService<ModTasks> {
     ApiResult<?> getTaskStatus(String taskId);
 
     ApiResult<?> stopTask(String taskId);
+
+    ApiResult<?> uploadTaskInput(String taskId, MultipartFile file, Boolean overwrite);
+
+    ApiResult<?> listTaskInputFiles(String taskId);
+
+    ApiResult<?> deleteTaskInputFile(String taskId, String fileName);
+
+    ApiResult<?> listTaskResultFiles(String taskId);
+
+    ResponseEntity<byte[]> downloadTaskResultFile(String taskId, String fileName);
 }

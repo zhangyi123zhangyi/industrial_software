@@ -7,7 +7,9 @@ import com.scut.industrial_software.model.dto.RemoteTaskStartDTO;
 import com.scut.industrial_software.model.dto.TaskCreateDTO;
 import com.scut.industrial_software.service.IModTasksService;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
 /**
  * <p>
@@ -91,5 +93,48 @@ public class ModTasksController {
         return modTasksService.stopTask(taskId);
     }
 
+    /**
+     * 上传任务输入文件
+     */
+    @PostMapping("/{taskId}/files/input")
+    public ApiResult<?> uploadTaskInput(@PathVariable String taskId,
+                                        @RequestParam("file") MultipartFile file,
+                                        @RequestParam(value = "overwrite", defaultValue = "true") Boolean overwrite) {
+        return modTasksService.uploadTaskInput(taskId, file, overwrite);
+    }
+
+    /**
+     * 查询任务输入文件列表
+     */
+    @GetMapping("/{taskId}/files/input")
+    public ApiResult<?> listTaskInputFiles(@PathVariable String taskId) {
+        return modTasksService.listTaskInputFiles(taskId);
+    }
+
+    /**
+     * 删除任务输入文件
+     */
+    @DeleteMapping("/{taskId}/files/input")
+    public ApiResult<?> deleteTaskInputFile(@PathVariable String taskId,
+                                            @RequestParam String fileName) {
+        return modTasksService.deleteTaskInputFile(taskId, fileName);
+    }
+
+    /**
+     * 查询任务结果文件列表
+     */
+    @GetMapping("/{taskId}/files/results")
+    public ApiResult<?> listTaskResultFiles(@PathVariable String taskId) {
+        return modTasksService.listTaskResultFiles(taskId);
+    }
+
+    /**
+     * 下载任务结果文件
+     */
+    @GetMapping("/{taskId}/files/results/download")
+    public ResponseEntity<byte[]> downloadTaskResultFile(@PathVariable String taskId,
+                                                         @RequestParam String fileName) {
+        return modTasksService.downloadTaskResultFile(taskId, fileName);
+    }
 
 }
